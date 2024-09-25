@@ -1,6 +1,7 @@
 from dotenv import load_dotenv
+import json
 import chainlit as cl
-from movie_functions import get_now_playing_movies, get_showtimes
+from movie_functions import get_now_playing_movies, get_showtimes, get_reviews
 
 load_dotenv()
 
@@ -54,12 +55,54 @@ async def generate_response(client, message_history, gen_kwargs):
 
     return response_message
 
+@observe
+async def fetch_relevant_context(message_history):
+
+    system_prompt = """\
+    Based on the conversation, determine if the topic is about a specific movie.
+    Determine if the user is asking a question that would be aided by knowing what
+    critics are saying about the movie. Determine if the reviews for that movie have
+    already been provided in the conversation. If so, do not fetch reviews.
+
+    Your only role is to evaluate the conversation, and decide whether to fetch reviews.
+
+    Output the current movie, id, a boolean to fetch reviews in JSON format, and your
+    rationale. Do not output as a code block.
+
+    {
+        "movie": "title",
+        "id": 123,
+        "fetch_reviews": true
+        "rationale": "reasoning"
+    }
+    """
+
+    temp_message_history = message_history.copy()
+    temp_message_history[0] = {"role": "system", "content": system_prompt}
+    temp_message_history.append({"role": "system", "content": system_prompt})
+
+    context_response = await client.chat.completions.create(messages=temp_message_history, **gen_kwargs)
+
+    print(f"Debug: Context response: {context_response.choices[0].message.content}")
+
+    context_data = context_response.choices[0].message.content
+    context_json = json.loads(context_data)
+
+    if context_json.get("fetch_reviews", False):
+        movie_id = context_json.get("id")
+        reviews = get_reviews(movie_id)
+        reviews = f"Reviews for {context_json.get('movie')} (ID: {movie_id}):\n\n{reviews}"
+        context_message = {"role": "system", "content": f"CONTEXT: {reviews}"}
+        message_history.append(context_message)
+
 @cl.on_message
 @observe
 async def on_message(message: cl.Message):
     message_history = cl.user_session.get("message_history", [])
     message_history.append({"role": "user", "content": message.content})
     
+    await fetch_relevant_context(message_history)
+
     response_message = await generate_response(client, message_history, gen_kwargs)
 
     message_history.append({"role": "assistant", "content": response_message.content})
